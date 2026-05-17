@@ -49,12 +49,17 @@ func (s *InstagramService) FetchProfile(username string) (*models.ScrapedProfile
 		}
 	}
 
-	// Method 2: Official oEmbed (verifies account exists, limited data)
+	// Method 2: Free Public Web API (no auth needed, uses App ID)
+	if p, err := s.tryWebAPI(clean); err == nil {
+		return p, nil
+	}
+
+	// Method 3: Official oEmbed (verifies account exists, limited data)
 	if p, err := s.tryOEmbed(clean); err == nil {
 		return p, nil
 	}
 
-	// Method 3: All automated methods failed — return manual entry signal
+	// Method 4: All automated methods failed — return manual entry signal
 	return &models.ScrapedProfile{
 		Platform:    "Instagram",
 		Username:    clean,
@@ -64,6 +69,93 @@ func (s *InstagramService) FetchProfile(username string) (*models.ScrapedProfile
 		ScrapedAt:   time.Now().Format(time.RFC3339),
 		Method:      "manual",
 	}, nil
+}
+
+// tryWebAPI calls the public Instagram GraphQL Web API using an App ID header
+func (s *InstagramService) tryWebAPI(username string) (*models.ScrapedProfile, error) {
+	url := "https://www.instagram.com/api/v1/users/web_profile_info/?username=" + username
+
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("User-Agent", randomUserAgent())
+	// Required to bypass login wall for public GraphQL endpoint
+	req.Header.Set("x-ig-app-id", "936619743392459") 
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("Web API status %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Data struct {
+			User struct {
+				Username      string `json:"username"`
+				FullName      string `json:"full_name"`
+				Biography     string `json:"biography"`
+				IsVerified    bool   `json:"is_verified"`
+				ProfilePicURL string `json:"profile_pic_url_hd"`
+				Followers     struct {
+					Count int64 `json:"count"`
+				} `json:"edge_followed_by"`
+				Following struct {
+					Count int64 `json:"count"`
+				} `json:"edge_follow"`
+				Media struct {
+					Count int64 `json:"count"`
+				} `json:"edge_owner_to_timeline_media"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	u := result.Data.User
+	if u.Username == "" {
+		return nil, fmt.Errorf("no user data in Web API response")
+	}
+
+	initials := strings.ToUpper(u.FullName)
+	if len(initials) > 2 {
+		initials = initials[:2]
+	}
+	if initials == "" {
+		initials = strings.ToUpper(username[:min(2, len(username))])
+	}
+
+	verified := 0
+	if u.IsVerified {
+		verified = 1
+	}
+
+	return &models.ScrapedProfile{
+		Platform:        "Instagram",
+		Username:        u.Username,
+		DisplayName:     u.FullName,
+		AvatarInitials:  initials,
+		Followers:       u.Followers.Count,
+		Following:       u.Following.Count,
+		Posts:           u.Media.Count,
+		Bio:             u.Biography,
+		Verified:        verified,
+		ProfileImageURL: u.ProfilePicURL,
+		ScrapedAt:       time.Now().Format(time.RFC3339),
+		Method:          "web_api",
+	}, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // tryRapidAPI calls a RapidAPI Instagram scraper
@@ -113,7 +205,7 @@ func (s *InstagramService) tryRapidAPI(username string) (*models.ScrapedProfile,
 		initials = initials[:2]
 	}
 	if initials == "" {
-		initials = strings.ToUpper(username[:2])
+		initials = strings.ToUpper(username[:min(2, len(username))])
 	}
 
 	verified := 0
@@ -192,5 +284,5 @@ func (s *InstagramService) TestConnection() (bool, string) {
 	if s.HasRapidAPI() {
 		return true, "rapidapi configured"
 	}
-	return true, "oembed+manual mode"
+	return true, "web_api active"
 }
