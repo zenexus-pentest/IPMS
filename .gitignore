@@ -25,3 +25,8 @@ Thumbs.db
 # Go
 go-backend/server
 go-backend/ipms
+go-backend/main
+
+# SQLite WAL files
+*.db-shm
+*.db-wal
